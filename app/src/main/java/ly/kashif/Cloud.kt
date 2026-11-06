@@ -28,13 +28,13 @@ object Cloud {
         return c
     }
 
-    /** يعيد null عند النجاح أو نص الخطأ. */
+    /** يرسل الأسماء عبر دالة add_names في Supabase. يعيد null عند النجاح أو نص الخطأ. */
     fun insertNames(batch: List<Pair<String, String>>): String? {
         val arr = JSONArray()
         batch.forEach { arr.put(JSONObject().put("number", it.first).put("name", it.second)) }
-        val c = conn("/rest/v1/contact_names?on_conflict=number,name", "resolution=ignore-duplicates,return=minimal")
+        val c = conn("/rest/v1/rpc/add_names", null)
         return try {
-            c.outputStream.use { it.write(arr.toString().toByteArray(Charsets.UTF_8)) }
+            c.outputStream.use { it.write(JSONObject().put("items", arr).toString().toByteArray(Charsets.UTF_8)) }
             val code = c.responseCode
             if (code in 200..299) null else "HTTP $code " + c.errorStream?.bufferedReader()?.readText().orEmpty().take(150)
         } finally { c.disconnect() }
