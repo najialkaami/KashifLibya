@@ -25,8 +25,8 @@ import java.net.URL
 
 // ضع هنا بيانات مشروعك من Supabase (Project Settings > API)
 // استخدم مفتاح anon (العام) فقط، ولا تضع service_role أبداً داخل التطبيق.
-private const val SUPABASE_URL = "https://YOUR-PROJECT.supabase.co"
-private const val SUPABASE_ANON_KEY = "YOUR-ANON-KEY"
+private const val SUPABASE_URL = "https://eutobimccyaslmsqqppq.supabase.co"
+private const val SUPABASE_ANON_KEY = "sb_publishable_q5H4xqeyBc7qYn4adMZYYA_rpcN90yp"
 
 private const val PREFS = "kashif"
 private const val KEY_CONSENT = "contacts_consent"
