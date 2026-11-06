@@ -77,6 +77,7 @@ fun App() {
         Column(Modifier.padding(pad).padding(horizontal = 14.dp)) {
             Text("كاشف ليبيا", fontSize = 24.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary,
                 modifier = Modifier.padding(vertical = 14.dp))
+            SyncStatus()
             RoleBanner()
             when (tab) {
                 0 -> Recents(entries)
