@@ -20,10 +20,16 @@ class ScreeningService : CallScreeningService() {
         val e = runBlocking(Dispatchers.IO) { AppDatabase.get(applicationContext).dao().find(n) }
         val block = e?.blocked == true
         respondToCall(details, CallResponse.Builder().setDisallowCall(block).setRejectCall(block).build())
-        if (e == null) {
-            val app = applicationContext
-            Thread { Notifier.show(app, n, Cloud.lookup(n), block) }.start()
-        } else Notifier.show(this, n, e, block)
+        val app = applicationContext
+        if (block) { Notifier.show(app, n, e, true); return }
+        if (e != null) {
+            if (CallerOverlay.canShow(app)) CallerOverlay.show(app, n, e) else Notifier.show(app, n, e, false)
+        } else {
+            Thread {
+                val r = Cloud.lookup(n)
+                if (CallerOverlay.canShow(app)) CallerOverlay.show(app, n, r) else Notifier.show(app, n, r, false)
+            }.start()
+        }
     }
 }
 
@@ -32,7 +38,7 @@ object Notifier {
         if (Build.VERSION.SDK_INT >= 33 &&
             c.checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) return
         val nm = c.getSystemService(NotificationManager::class.java)
-        nm.createNotificationChannel(NotificationChannel("caller", "كاشف المتصل", NotificationManager.IMPORTANCE_HIGH))
+        nm.createNotificationChannel(NotificationChannel("caller", "هوية المتصل", NotificationManager.IMPORTANCE_HIGH))
         val title = e?.name?.ifBlank { null } ?: "رقم غير معروف"
         val text = when {
             blocked -> "تم حظر هذا الرقم تلقائياً"

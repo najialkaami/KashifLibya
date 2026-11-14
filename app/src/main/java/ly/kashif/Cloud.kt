@@ -44,6 +44,8 @@ object Cloud {
     fun lookup(number: String): NumberEntry? {
         if (!configured) return null
         val c = conn("/rest/v1/rpc/lookup_name", null)
+        c.connectTimeout = 4000
+        c.readTimeout = 5000
         return try {
             c.outputStream.use { it.write(JSONObject().put("n", number).toString().toByteArray(Charsets.UTF_8)) }
             if (c.responseCode !in 200..299) return null

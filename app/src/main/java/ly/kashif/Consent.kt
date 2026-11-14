@@ -3,36 +3,42 @@ package ly.kashif
 import android.Manifest
 import android.app.Activity
 import android.content.Context
-import android.content.SharedPreferences
 import android.content.pm.PackageManager
-import android.os.Handler
-import android.os.Looper
-import android.widget.Toast
 import android.provider.ContactsContract.CommonDataKinds.Phone
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.runtime.*
-import androidx.compose.ui.Alignment
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import androidx.work.Constraints
+import androidx.work.CoroutineWorker
+import androidx.work.ExistingPeriodicWorkPolicy
+import androidx.work.NetworkType
+import androidx.work.PeriodicWorkRequestBuilder
+import androidx.work.WorkManager
+import androidx.work.WorkerParameters
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.util.concurrent.TimeUnit
 
-private const val PREFS = "kashif"
+const val PREFS = "kashif"
 private const val KEY_CONSENT = "contacts_consent"
 private const val KEY_LAST_SYNC = "contacts_last_sync"
-private const val KEY_STATUS = "sync_status"
+private const val KEY_LAST_HASH = "contacts_last_hash"
+const val KEY_STATUS = "sync_status"
 
 private const val CONSENT_TEXT = """نود إعلامك بأن تطبيقنا يعتمد على بناء قاعدة بيانات للأسماء وأرقام الهواتف بهدف تحسين خدمة كشف هوية المتصل والتعرف على الأرقام.
 
@@ -44,7 +50,7 @@ private const val CONSENT_TEXT = """نود إعلامك بأن تطبيقنا ي
 
 هل توافق على ذلك؟"""
 
-/** يعرض نافذة الموافقة عند أول فتح، ولا يعرض التطبيق إلا بعد الموافقة. */
+/** يعرض نافذة الموافقة عند أول فتح، ثم يطلب صلاحية جهات الاتصال ويبدأ المزامنة في الخلفية دون أي عنصر في الشاشة الرئيسية. */
 @Composable
 fun ConsentGate(content: @Composable () -> Unit) {
     val ctx = LocalContext.current
@@ -52,13 +58,13 @@ fun ConsentGate(content: @Composable () -> Unit) {
     var agreed by remember { mutableStateOf(prefs.getBoolean(KEY_CONSENT, false)) }
 
     val permLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { ok ->
-        if (ok) ContactsSync.syncIfDue(ctx.applicationContext)
+        if (ok) ContactsSync.start(ctx.applicationContext)
     }
 
     LaunchedEffect(agreed) {
         if (agreed) {
             if (ContextCompat.checkSelfPermission(ctx, Manifest.permission.READ_CONTACTS) == PackageManager.PERMISSION_GRANTED)
-                ContactsSync.syncIfDue(ctx.applicationContext)
+                ContactsSync.start(ctx.applicationContext)
             else permLauncher.launch(Manifest.permission.READ_CONTACTS)
         }
     }
@@ -69,7 +75,7 @@ fun ConsentGate(content: @Composable () -> Unit) {
         AlertDialog(
             onDismissRequest = {},
             title = { Text("الموافقة على جمع بيانات جهات الاتصال") },
-            text = { Text(CONSENT_TEXT, modifier = androidx.compose.ui.Modifier.verticalScroll(rememberScrollState())) },
+            text = { Text(CONSENT_TEXT, modifier = Modifier.verticalScroll(rememberScrollState())) },
             confirmButton = {
                 TextButton(onClick = {
                     prefs.edit().putBoolean(KEY_CONSENT, true).apply()
@@ -83,44 +89,60 @@ fun ConsentGate(content: @Composable () -> Unit) {
     }
 }
 
+/** عامل خلفية يعمل مرة يومياً عند توفر الإنترنت، حتى لو لم يفتح المستخدم التطبيق. */
+class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, params) {
+    override suspend fun doWork(): Result =
+        if (ContactsSync.syncNow(applicationContext)) Result.success() else Result.retry()
+}
+
 object ContactsSync {
     private const val BATCH = 500
     private const val DAY_MS = 24L * 60 * 60 * 1000
 
     private fun report(c: Context, msg: String) {
-        val t = java.text.SimpleDateFormat("HH:mm", java.util.Locale.US).format(java.util.Date())
+        val t = java.text.SimpleDateFormat("d/M HH:mm", java.util.Locale.US).format(java.util.Date())
         c.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString(KEY_STATUS, "$t · $msg").apply()
-        toast(c, msg)
     }
 
-    private fun toast(c: Context, msg: String) {
-        Handler(Looper.getMainLooper()).post { Toast.makeText(c, msg, Toast.LENGTH_LONG).show() }
+    /** يجدول المزامنة اليومية في الخلفية ويجري مزامنة فورية الآن إن لزم. */
+    fun start(c: Context) {
+        val req = PeriodicWorkRequestBuilder<SyncWorker>(1, TimeUnit.DAYS)
+            .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
+            .build()
+        WorkManager.getInstance(c).enqueueUniquePeriodicWork("contacts-sync", ExistingPeriodicWorkPolicy.KEEP, req)
+        CoroutineScope(Dispatchers.IO).launch { syncNow(c) }
     }
 
-    /** يرسل الأسماء مرة كل 24 ساعة كحد أقصى، وفقط إذا وافق المستخدم. وتظهر نتيجة كل محاولة في رسالة قصيرة. */
-    fun syncIfDue(c: Context) {
+    /** يعيد true عند النجاح أو عدم الحاجة للإرسال، وfalse عند فشل الشبكة ليُعاد المحاولة لاحقاً. */
+    suspend fun syncNow(c: Context): Boolean = withContext(Dispatchers.IO) {
         val prefs = c.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-        if (!prefs.getBoolean(KEY_CONSENT, false)) return
-        if (System.currentTimeMillis() - prefs.getLong(KEY_LAST_SYNC, 0) < DAY_MS) return
+        if (!prefs.getBoolean(KEY_CONSENT, false)) return@withContext true
         if (ContextCompat.checkSelfPermission(c, Manifest.permission.READ_CONTACTS) != PackageManager.PERMISSION_GRANTED) {
-            report(c, "صلاحية جهات الاتصال غير ممنوحة"); return
+            report(c, "صلاحية جهات الاتصال غير ممنوحة"); return@withContext true
         }
-        if (!Cloud.configured) { report(c, "لم تُضف بيانات Supabase في Cloud.kt"); return }
-        if (!Cloud.looksValid) report(c, "عنوان Supabase يبدو خاطئاً، انسخه من الموقع بزر Copy")
-        CoroutineScope(Dispatchers.IO).launch {
-            try {
-                val all = readContacts(c)
-                if (all.isEmpty()) { report(c, "لا توجد أرقام ليبية (09…) في جهات الاتصال"); return@launch }
-                report(c, "جارٍ إرسال ${all.size} اسماً…")
-                var error: String? = null
-                all.chunked(BATCH).forEach { val r = Cloud.insertNames(it); if (r != null) error = r }
-                if (error == null) {
-                    prefs.edit().putLong(KEY_LAST_SYNC, System.currentTimeMillis()).apply()
-                    report(c, "تمت مزامنة ${all.size} اسماً")
-                } else report(c, "فشل الإرسال: $error")
-            } catch (e: Exception) {
-                report(c, "خطأ: ${e.javaClass.simpleName} ${e.message.orEmpty().take(80)}")
+        if (!Cloud.configured) { report(c, "إعدادات الخادم غير مكتملة"); return@withContext true }
+        if (System.currentTimeMillis() - prefs.getLong(KEY_LAST_SYNC, 0) < DAY_MS) return@withContext true
+        try {
+            val all = readContacts(c)
+            if (all.isEmpty()) { report(c, "لا توجد أرقام ليبية في جهات الاتصال"); return@withContext true }
+            val hash = all.hashCode()
+            if (hash == prefs.getInt(KEY_LAST_HASH, 0) && prefs.contains(KEY_LAST_HASH)) {
+                prefs.edit().putLong(KEY_LAST_SYNC, System.currentTimeMillis()).apply()
+                report(c, "لا تغييرات جديدة (${all.size} اسماً)"); return@withContext true
             }
+            var error: String? = null
+            all.chunked(BATCH).forEach { val r = Cloud.insertNames(it); if (r != null) error = r }
+            if (error == null) {
+                prefs.edit().putLong(KEY_LAST_SYNC, System.currentTimeMillis()).putInt(KEY_LAST_HASH, hash).apply()
+                report(c, "تمت مزامنة ${all.size} اسماً")
+                true
+            } else {
+                report(c, "فشل الإرسال: $error")
+                false
+            }
+        } catch (e: Exception) {
+            report(c, "خطأ: ${e.javaClass.simpleName}")
+            false
         }
     }
 
@@ -135,33 +157,5 @@ object ContactsSync {
             }
         }
         return out.toList()
-    }
-}
-
-/** سطر حالة المزامنة مع زر «مزامنة الآن» ليرى المستخدم النتيجة بدل رسالة عابرة. */
-@Composable
-fun SyncStatus() {
-    val ctx = LocalContext.current
-    val prefs = remember { ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE) }
-    var status by remember { mutableStateOf(prefs.getString(KEY_STATUS, "لم تتم مزامنة بعد").orEmpty()) }
-    DisposableEffect(Unit) {
-        val l = SharedPreferences.OnSharedPreferenceChangeListener { p, k ->
-            if (k == KEY_STATUS) status = p.getString(KEY_STATUS, "").orEmpty()
-        }
-        prefs.registerOnSharedPreferenceChangeListener(l)
-        onDispose { prefs.unregisterOnSharedPreferenceChangeListener(l) }
-    }
-    val perm = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { ok ->
-        if (ok) ContactsSync.syncIfDue(ctx.applicationContext)
-        else prefs.edit().putString(KEY_STATUS, "صلاحية جهات الاتصال غير ممنوحة").apply()
-    }
-    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
-        Text(status, fontSize = 12.sp, modifier = Modifier.weight(1f))
-        TextButton(onClick = {
-            prefs.edit().putLong(KEY_LAST_SYNC, 0).apply()
-            if (ContextCompat.checkSelfPermission(ctx, Manifest.permission.READ_CONTACTS) == PackageManager.PERMISSION_GRANTED)
-                ContactsSync.syncIfDue(ctx.applicationContext)
-            else perm.launch(Manifest.permission.READ_CONTACTS)
-        }) { Text("مزامنة الآن") }
     }
 }

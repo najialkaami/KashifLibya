@@ -3,11 +3,15 @@ package ly.kashif
 import android.Manifest
 import android.app.role.RoleManager
 import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import android.provider.Settings
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import android.provider.CallLog
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -58,10 +62,10 @@ fun App() {
     val dao = remember { AppDatabase.get(ctx).dao() }
     val scope = rememberCoroutineScope()
     var tab by remember { mutableIntStateOf(0) }
+    var showPrivacy by remember { mutableStateOf(false) }
     val entries by dao.all().collectAsState(emptyList())
     val perms = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {}
     LaunchedEffect(Unit) {
-        if (dao.count() == 0) dao.insertAll(Seed.list)
         if (Build.VERSION.SDK_INT >= 33) perms.launch(arrayOf(Manifest.permission.POST_NOTIFICATIONS))
     }
     Scaffold(
@@ -75,14 +79,23 @@ fun App() {
         }
     ) { pad ->
         Column(Modifier.padding(pad).padding(horizontal = 14.dp)) {
-            Text("كاشف ليبيا", fontSize = 24.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.padding(vertical = 14.dp))
-            SyncStatus()
-            RoleBanner()
-            when (tab) {
-                0 -> Recents(entries)
-                1 -> SearchTab(dao, scope)
-                else -> BlockedTab(entries.filter { it.blocked }, dao, scope)
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween) {
+                Text("هوية المتصل", fontSize = 24.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.padding(vertical = 14.dp))
+                TextButton(onClick = { showPrivacy = !showPrivacy }) { Text(if (showPrivacy) "رجوع" else "الخصوصية") }
+            }
+            if (showPrivacy) {
+                BackHandler { showPrivacy = false }
+                PrivacyScreen()
+            } else {
+                RoleBanner()
+                OverlayBanner()
+                when (tab) {
+                    0 -> Recents(entries)
+                    1 -> SearchTab(dao, scope)
+                    else -> BlockedTab(entries.filter { it.blocked }, dao, scope)
+                }
             }
         }
     }
@@ -100,9 +113,28 @@ fun RoleBanner() {
     Card(Modifier.fillMaxWidth().padding(bottom = 10.dp)) {
         Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("فعّل كشف المكالمات", fontWeight = FontWeight.Bold)
-            Text("ليعرّفك التطبيق بالمتصل ويحظر المزعجين، اختر «كاشف ليبيا» كتطبيق فحص المكالمات.", fontSize = 13.sp)
+            Text("ليعرّفك التطبيق بالمتصل ويحظر المزعجين، اختر «هوية المتصل» كتطبيق فحص المكالمات.", fontSize = 13.sp)
             Button(onClick = { launcher.launch(rm.createRequestRoleIntent(RoleManager.ROLE_CALL_SCREENING)) },
                 modifier = Modifier.fillMaxWidth()) { Text("تفعيل") }
+        }
+    }
+}
+
+@Composable
+fun OverlayBanner() {
+    val ctx = LocalContext.current
+    var ok by remember { mutableStateOf(CallerOverlay.canShow(ctx)) }
+    val launcher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+        ok = CallerOverlay.canShow(ctx)
+    }
+    if (ok) return
+    Card(Modifier.fillMaxWidth().padding(bottom = 10.dp)) {
+        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("أظهر اسم المتصل فوق شاشة المكالمة", fontWeight = FontWeight.Bold)
+            Text("اسمح بالعرض فوق التطبيقات ليظهر اسم المتصل ورقمه لحظة الاتصال.", fontSize = 13.sp)
+            Button(onClick = {
+                launcher.launch(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:" + ctx.packageName)))
+            }, modifier = Modifier.fillMaxWidth()) { Text("السماح") }
         }
     }
 }
